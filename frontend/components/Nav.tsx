@@ -61,9 +61,7 @@ export function Nav() {
                 href={l.href}
                 className="display text-[0.78rem] tracking-[0.18em] uppercase px-3 py-2 transition-colors"
                 style={{
-                  color: isActive(l.href)
-                    ? "var(--gold-bright)"
-                    : "rgba(243, 238, 223, 0.65)",
+                  color: isActive(l.href) ? "var(--gold-bright)" : "var(--ivory)",
                 }}
               >
                 {l.label}
