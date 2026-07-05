@@ -82,13 +82,13 @@ Escrivan/
 
 ## Contract
 
-- **Address:** `0x37dBB77F69c95E17675304be0253BF6B870b7411`
+- **Address:** `0x37b49452B2b03F68fBE3A9Fc36DBA7dAdCA888d7`
 - **Network:** GenLayer Studionet (chainId `61999`, RPC `https://studio.genlayer.com/api`)
 - **Constructor:** no arguments — no protocol owner
 
 Read state:
 ```bash
-genlayer call 0x37dBB77F69c95E17675304be0253BF6B870b7411 get_protocol_stats
+genlayer call 0x37b49452B2b03F68fBE3A9Fc36DBA7dAdCA888d7 get_protocol_stats
 ```
 
 ---
