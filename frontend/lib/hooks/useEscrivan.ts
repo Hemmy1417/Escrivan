@@ -3,7 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import Escrivan from "../contracts/escrivan";
-import { CONTRACT_ADDRESS, CONTRACT_CONFIGURED } from "../config";
+import { CONTRACT_ADDRESS, CONTRACT_CONFIGURED, explorerTxUrl } from "../config";
 import { useWallet } from "../genlayer/wallet";
 import { success, error } from "../toast";
 import type { Grant, Report, ProtocolStats } from "../contracts/types";
@@ -120,12 +120,13 @@ export function useAwardGrant() {
       setIsAwarding(true);
       return contract.awardGrant(args.grantee, args.title, args.obligations, args.totalWei);
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       qc.invalidateQueries({ queryKey: ["grantsAwarded"] });
       qc.invalidateQueries({ queryKey: ["protocolStats"] });
       setIsAwarding(false);
       success("Grant entered in the register", {
         description: "Escrow locked. The grantee can now report against the first obligation.",
+        explorerUrl: explorerTxUrl(data?.txHash),
       });
     },
     onError: (err: any) => {
@@ -152,11 +153,12 @@ export function useSubmitReport() {
       setIsSubmitting(true);
       return contract.submitReport(args.grantId, args.narrative, args.evidenceUrls);
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       qc.invalidateQueries();   // ruling touches grant, reports, ledger, stats
       setIsSubmitting(false);
       success("Ruling entered", {
         description: "The panel has ruled. Check the report for the verdict and any tranche release.",
+        explorerUrl: explorerTxUrl(data?.txHash),
       });
     },
     onError: (err: any) => {
@@ -179,11 +181,12 @@ export function useCloseGrant() {
       setIsClosing(true);
       return contract.closeGrant(grantId);
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       qc.invalidateQueries();
       setIsClosing(false);
       success("Grant closed", {
         description: "Remaining escrow returned to your wallet.",
+        explorerUrl: explorerTxUrl(data?.txHash),
       });
     },
     onError: (err: any) => {

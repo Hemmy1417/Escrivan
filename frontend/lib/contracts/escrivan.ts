@@ -163,38 +163,41 @@ class Escrivan {
     title: string,
     obligations: string[],
     totalWei: bigint,
-  ): Promise<TransactionReceipt> {
+  ): Promise<{ receipt: TransactionReceipt; txHash: string }> {
     const txHash = await this.client.writeContract({
       address: this.address,
       functionName: "award_grant",
       args: [grantee, title, JSON.stringify(obligations)],
       value: totalWei,
     });
-    return this.waitAndVerify(txHash);
+    const receipt = await this.waitAndVerify(txHash);
+    return { receipt, txHash: String(txHash) };
   }
 
   async submitReport(
     grantId: string,
     narrative: string,
     evidenceUrls: string[],
-  ): Promise<TransactionReceipt> {
+  ): Promise<{ receipt: TransactionReceipt; txHash: string }> {
     const txHash = await this.client.writeContract({
       address: this.address,
       functionName: "submit_report",
       args: [grantId, narrative, evidenceUrls],
       value: BigInt(0),
     });
-    return this.waitAndVerify(txHash);
+    const receipt = await this.waitAndVerify(txHash);
+    return { receipt, txHash: String(txHash) };
   }
 
-  async closeGrant(grantId: string): Promise<TransactionReceipt> {
+  async closeGrant(grantId: string): Promise<{ receipt: TransactionReceipt; txHash: string }> {
     const txHash = await this.client.writeContract({
       address: this.address,
       functionName: "close_grant",
       args: [grantId],
       value: BigInt(0),
     });
-    return this.waitAndVerify(txHash);
+    const receipt = await this.waitAndVerify(txHash);
+    return { receipt, txHash: String(txHash) };
   }
 }
 

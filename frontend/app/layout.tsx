@@ -5,6 +5,7 @@ import { Providers } from "./providers";
 import { Nav } from "@/components/Nav";
 import { NetworkBanner } from "@/components/NetworkBanner";
 import { LiveBackdrop } from "@/components/LiveBackdrop";
+import { CONTRACT_ADDRESS, explorerAddressUrl } from "@/lib/config";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -48,7 +49,15 @@ export default function RootLayout({
             <div className="mx-auto max-w-6xl px-5 py-6 flex flex-wrap items-center justify-between gap-3 text-xs">
               <span className="eyebrow">Entered in the register · GenLayer Studionet</span>
               <span className="text-muted">
-                Stewardship rulings by AI panel · tranches release in GEN
+                Stewardship rulings by AI panel · tranches release in GEN ·{" "}
+                <a
+                  href={explorerAddressUrl(CONTRACT_ADDRESS)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-ivory"
+                >
+                  Verify on explorer ↗
+                </a>
               </span>
             </div>
           </footer>
