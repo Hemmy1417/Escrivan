@@ -305,25 +305,26 @@ class Escrivan(gl.Contract):
                     )
             evidence_block = "\n".join(snippets)
 
-            task = f"""
+            # The nondet block returns the INPUT (grant file + narrative +
+            # fetched evidence). The eq principle itself runs the LLM with
+            # `task` on this input, so every validator judges the leader's
+            # ruling with the same material in front of it. Nesting our own
+            # exec_prompt here instead caused UNDETERMINED rounds: validators
+            # were asked to verify grounding against evidence they never saw.
+            return (
+                f"GRANT TITLE: {grant['title']}\n\n"
+                f"OBLIGATION UNDER REVIEW (#{obligation_index + 1} of {grant['obligations_total']}):\n"
+                f"{obligation_text}\n\n"
+                f"FULL OBLIGATION SCHEDULE:\n{json.dumps(grant['obligations'])}\n\n"
+                f"TRANCHE AT STAKE: {grant['tranche_wei']} wei\n\n"
+                f"GRANTEE'S PROGRESS NARRATIVE:\n{text[:4000]}\n\n"
+                f"FETCHED EVIDENCE (retrieved from the cited URLs):\n{evidence_block}"
+            )
+
+        task = f"""
 You are the stewardship reviewer for an on-chain grant accountability
 protocol. A grantee has submitted a periodic report against a specific
 obligation. Rule whether the report demonstrates the obligation was met.
-
-GRANT TITLE: {grant['title']}
-OBLIGATION UNDER REVIEW (#{obligation_index + 1} of {grant['obligations_total']}):
-{obligation_text}
-
-FULL OBLIGATION SCHEDULE:
-{json.dumps(grant['obligations'])}
-
-TRANCHE AT STAKE: {grant['tranche_wei']} wei
-
-GRANTEE'S PROGRESS NARRATIVE:
-{text[:4000]}
-
-FETCHED EVIDENCE (validators retrieved these URLs independently):
-{evidence_block}
 
 Rule the report on four dimensions, then give an overall verdict:
   progress_quality:   STRONG | ADEQUATE | WEAK
@@ -348,15 +349,16 @@ Respond ONLY with this JSON (no markdown fence, no prose):
   "summary":            "<2-4 sentence rationale citing the narrative and evidence>"
 }}
 """
-            return gl.nondet.exec_prompt(task)
 
-        # Non-comparative consensus: the validator judges the leader's ruling
+        # Non-comparative consensus: validators judge the leader's ruling
         # against written criteria instead of re-running the LLM and comparing
-        # decision fields. Borderline qualitative cases can land on different
-        # verdicts across rollouts; comparative matching would false-reject.
+        # decision fields (borderline qualitative cases can land on different
+        # verdicts across rollouts; comparative matching would false-reject).
+        # Criteria are phrased so a validator can always evaluate them from
+        # the task, the input, and the output alone.
         criteria = f"""
 Accept the output if ALL of the following hold:
-- It is a single JSON object with exactly the keys: progress_quality,
+- It is a single JSON object with the keys: progress_quality,
   evidence_strength, spending_alignment, impact_credibility, overall,
   confidence, red_flags, missing_information, summary.
 - Each enum field is in its declared set ({ALLOWED_PROGRESS} /
@@ -364,18 +366,16 @@ Accept the output if ALL of the following hold:
   {ALLOWED_VERDICTS}).
 - confidence is an integer 0-100.
 - red_flags and missing_information are arrays (possibly empty).
-- summary is a non-empty string that references the actual report or
-  evidence content, not generic boilerplate.
+- summary is a non-empty string consistent with the verdict and the four
+  dimension findings — not generic boilerplate.
 - The overall verdict is a defensible reading of the four dimensions under
-  the stated rule (APPROVED needs progress ≥ ADEQUATE, evidence ≥ MODERATE,
-  no dimension at its worst level). Borderline judgments are acceptable
-  when the summary justifies them.
-- No invented facts: claims in red_flags and summary must be grounded in
-  the supplied narrative, obligations, or fetched evidence.
+  the stated rule (APPROVED needs progress at least ADEQUATE, evidence at
+  least MODERATE, and no dimension at its worst level). Borderline
+  judgments are acceptable when the summary justifies them.
 """
         raw = gl.eq_principle.prompt_non_comparative(
             run_review,
-            task="Review a grant progress report and rule on four qualitative dimensions plus an overall verdict.",
+            task=task,
             criteria=criteria,
         )
 
