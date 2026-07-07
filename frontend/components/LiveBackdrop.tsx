@@ -92,9 +92,12 @@ export function LiveBackdrop() {
 
         .cl-grain {
           position: absolute; inset: 0;
+          opacity: 0.55;
+          mix-blend-mode: multiply;
           background-image:
-            radial-gradient(rgba(10, 10, 10, 0.018) 1px, transparent 1px);
-          background-size: 4px 4px;
+            radial-gradient(rgba(10, 10, 10, 0.015) 1px, transparent 1px),
+            url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 0.60 0 0 0 0 0.53 0 0 0 0 0.38 0 0 0 0.06 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+          background-size: 4px 4px, 160px 160px;
         }
 
         @media (prefers-reduced-motion: reduce) {

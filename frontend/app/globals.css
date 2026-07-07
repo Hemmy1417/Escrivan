@@ -61,15 +61,18 @@
     font-feature-settings: "ss01" 1, "cv11" 1;
     color: var(--ivory-soft);
   }
-  /* Display voice: Inter 600 with negative tracking — the rounded-display
-     substitution the Clay spec prescribes when Plain Black is unavailable. */
+  /* Display voice: Fraunces — a warm, optically-sized old-style serif that
+     gives the stewardship charter its formal, printed-document character. */
   h1, h2, h3, h4, h5, h6,
   .display {
-    font-family: var(--font-inter), sans-serif;
+    font-family: var(--font-fraunces), Georgia, "Times New Roman", serif;
     font-weight: 600;
-    letter-spacing: -0.03em;
+    letter-spacing: -0.005em;
     color: var(--ivory);
+    font-optical-sizing: auto;
   }
+  /* Expressive italic accent for pull quotes / emphasis in headings. */
+  .display-italic { font-family: var(--font-fraunces), Georgia, serif; font-style: italic; font-weight: 500; }
   .mono {
     font-family: var(--font-mono), "IBM Plex Mono", ui-monospace, Menlo, monospace;
     letter-spacing: 0.01em;
