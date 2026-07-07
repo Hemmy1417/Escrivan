@@ -95,9 +95,23 @@ class _Nondet:
         return _EqPrinciple.canned_output
 
 
+class _Evm:
+    @staticmethod
+    def contract_interface(cls):
+        class _Proxy:
+            def __init__(self, addr):
+                self._addr = str(addr)
+
+            def emit_transfer(self, value, on=None):
+                _GL._emit.transfers.append((self._addr, int(value), on))
+        return _Proxy
+
+
 class _GL:
     class Contract:
         pass
+
+    evm = _Evm()
 
     public = _Public()
     vm = _VmModule

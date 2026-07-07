@@ -38,6 +38,18 @@ GUARDRAILS:
 """
 
 
+# Empty EVM interface: paying a wallet is an external message through the
+# chain layer (executed by the IC's ghost contract), NOT a GenVM call —
+# gl.get_contract_at(...).emit_transfer at an EOA errors at finalization
+# and the value is stranded. Proven empirically on Curia round 1.
+@gl.evm.contract_interface
+class _Payee:
+    class View:
+        pass
+    class Write:
+        pass
+
+
 class Escrivan(gl.Contract):
     """
     Escrivan — the on-chain accountability layer for grants.
@@ -115,8 +127,7 @@ class Escrivan(gl.Contract):
         """Return unreleased escrow to the funder. Returns the wei refunded."""
         remaining = int(grant["escrow_remaining_wei"])
         if remaining > 0:
-            gl.get_contract_at(Address(grant["funder"])).emit_transfer(
-                value=u256(remaining),
+            _Payee(Address(grant["funder"])).emit_transfer(value=u256(remaining),
                 on="finalized",
             )
             self.total_clawed_back_wei = u256(int(self.total_clawed_back_wei) + remaining)
@@ -428,8 +439,7 @@ Accept the output if ALL of the following hold:
                 release = int(grant["tranche_wei"])
             release = min(release, int(grant["escrow_remaining_wei"]))
 
-            gl.get_contract_at(Address(grant["grantee"])).emit_transfer(
-                value=u256(release),
+            _Payee(Address(grant["grantee"])).emit_transfer(value=u256(release),
                 on="finalized",
             )
             report["tranche_released_wei"] = str(release)
