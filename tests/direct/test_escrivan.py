@@ -73,11 +73,17 @@ class _FakeEmit:
 
 
 class _EqPrinciple:
-    """prompt_non_comparative stub — returns whatever the test primed."""
+    """prompt_non_comparative stub — returns whatever the test primed.
+    Also RUNS the input builder (fn) and captures it, so tests can assert
+    what material actually reached the panel (evidence, appeal notes)."""
     canned_output = "{}"
+    last_input = ""
+    last_task = ""
 
     @classmethod
     def prompt_non_comparative(cls, fn, task=None, criteria=None):
+        cls.last_input = fn()
+        cls.last_task = str(task or "")
         return cls.canned_output
 
 
@@ -299,19 +305,174 @@ def test_rejected_report_holds_tranche(module, contract):
     assert updated["status"] == "ACTIVE"
 
 
-def test_three_rejections_claw_back_to_funder(module, contract):
+def test_three_rejections_arm_clawback_but_move_nothing(module, contract):
     g = _award(module, contract)
     for _ in range(3):
         _report(module, contract, g["grant_id"], overall="REJECTED")
 
     updated = contract.get_grant(g["grant_id"])
-    assert updated["status"] == "CLAWED_BACK"
+    # armed, not executed: the appeal window stands between a rejection and the money
+    assert updated["status"] == "CLAWBACK_PENDING"
+    assert int(updated["escrow_remaining_wei"]) == 6 * GEN
+    assert module.gl._emit.transfers == []
+
+
+def test_finalize_clawback_blocked_inside_window(module, contract):
+    g = _award(module, contract)
+    for _ in range(3):
+        _report(module, contract, g["grant_id"], overall="REJECTED")
+    _as(module, FUNDER)
+    with pytest.raises(module.gl.vm.UserError, match="appeal window still open"):
+        contract.finalize_clawback(g["grant_id"])
+
+
+def test_finalize_clawback_after_window_refunds_funder(module, contract):
+    g = _award(module, contract)
+    for _ in range(3):
+        _report(module, contract, g["grant_id"], overall="REJECTED")
+    _award(module, contract, total=1 * GEN, n_obligations=2)   # unrelated action ticks the window
+    _as(module, FUNDER)
+    out = contract.finalize_clawback(g["grant_id"])
+
+    assert out["status"] == "CLAWED_BACK"
+    assert int(out["refunded_wei"]) == 6 * GEN
+    updated = contract.get_grant(g["grant_id"])
     assert int(updated["escrow_remaining_wei"]) == 0
-    # full 6 GEN back to the funder
-    assert module.gl._emit.transfers == [(FUNDER, 6 * GEN, "finalized")]
+    assert (FUNDER, 6 * GEN, "finalized") in module.gl._emit.transfers
     stats = contract.get_protocol_stats()
     assert int(stats["total_clawed_back_wei"]) == 6 * GEN
-    assert stats["active_grant_count"] == 0
+
+
+# ── Bonded appeals ───────────────────────────────────────────────────────────
+
+BOND = 2 * 10 ** 16   # 1% of the default 2 GEN tranche
+
+
+def _appeal(module, contract, report_id, overall="APPROVED", bond=BOND, sender=GRANTEE,
+            note="The panel missed the deployment link in evidence #1 — the deliverable is live at /releases."):
+    module.gl.eq_principle.canned_output = _ruling(overall=overall)
+    _as(module, sender, value=bond)
+    return contract.appeal_report(report_id, note)
+
+
+def test_appeal_flip_releases_tranche_and_returns_bond(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    out = _appeal(module, contract, r["report_id"], overall="APPROVED")
+
+    assert out["appeal_outcome"] == "FLIPPED"
+    assert out["overall"] == "APPROVED"
+    assert out["original_overall"] == "REJECTED"
+    assert int(out["tranche_released_wei"]) == 2 * GEN
+    # tranche + bond both landed with the grantee
+    assert (GRANTEE, 2 * GEN, "finalized") in module.gl._emit.transfers
+    assert (GRANTEE, BOND, "finalized") in module.gl._emit.transfers
+    updated = contract.get_grant(g["grant_id"])
+    assert updated["obligations_met"] == 1
+    assert updated["rejection_streak"] == 0
+    assert updated["status"] == "ACTIVE"
+
+
+def test_appeal_upheld_forfeits_bond_to_funder(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    out = _appeal(module, contract, r["report_id"], overall="REJECTED")
+
+    assert out["appeal_outcome"] == "UPHELD"
+    assert out["overall"] == "REJECTED"
+    assert int(out["tranche_released_wei"]) == 0
+    assert module.gl._emit.transfers == [(FUNDER, BOND, "finalized")]
+    updated = contract.get_grant(g["grant_id"])
+    assert updated["obligations_met"] == 0
+    assert updated["rejection_streak"] == 1
+
+
+def test_appeal_note_and_original_ruling_reach_the_panel(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    _appeal(module, contract, r["report_id"], overall="APPROVED",
+            note="Re-read evidence #1: the county sign-off is on page two.")
+    panel_input = module.gl.eq_principle.last_input
+    assert "BONDED APPEAL" in panel_input
+    assert "county sign-off is on page two" in panel_input
+    assert "ORIGINAL RULING" in panel_input
+    assert "APPEAL round" in module.gl.eq_principle.last_task
+
+
+def test_appeal_only_grantee(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    with pytest.raises(module.gl.vm.UserError, match="Only the grantee"):
+        _appeal(module, contract, r["report_id"], sender=FUNDER)
+
+
+def test_appeal_only_rejected_reports(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="APPROVED")
+    with pytest.raises(module.gl.vm.UserError, match="Only a REJECTED"):
+        _appeal(module, contract, r["report_id"])
+
+
+def test_appeal_once_only(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    _appeal(module, contract, r["report_id"], overall="REJECTED")
+    with pytest.raises(module.gl.vm.UserError, match="already appealed"):
+        _appeal(module, contract, r["report_id"])
+
+
+def test_appeal_only_latest_report(module, contract):
+    g = _award(module, contract)
+    r1 = _report(module, contract, g["grant_id"], overall="REJECTED")
+    _report(module, contract, g["grant_id"], overall="REJECTED")
+    with pytest.raises(module.gl.vm.UserError, match="latest report"):
+        _appeal(module, contract, r1["report_id"])
+
+
+def test_appeal_bond_minimum_enforced(module, contract):
+    g = _award(module, contract)
+    r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    with pytest.raises(module.gl.vm.UserError, match="bond too small"):
+        _appeal(module, contract, r["report_id"], bond=BOND - 1)
+
+
+def test_appeal_flip_disarms_pending_clawback(module, contract):
+    g = _award(module, contract)
+    for _ in range(3):
+        r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    assert contract.get_grant(g["grant_id"])["status"] == "CLAWBACK_PENDING"
+
+    out = _appeal(module, contract, r["report_id"], overall="APPROVED")
+    assert out["appeal_outcome"] == "FLIPPED"
+    updated = contract.get_grant(g["grant_id"])
+    assert updated["status"] == "ACTIVE"          # the clawback is disarmed
+    assert updated["rejection_streak"] == 2       # the overturned rejection uncounted
+    assert updated["obligations_met"] == 1
+    # a disarmed clawback can no longer be finalized
+    _as(module, FUNDER)
+    with pytest.raises(module.gl.vm.UserError, match="not CLAWBACK_PENDING"):
+        contract.finalize_clawback(g["grant_id"])
+
+
+def test_upheld_appeal_unlocks_immediate_finalize(module, contract):
+    g = _award(module, contract)
+    for _ in range(3):
+        r = _report(module, contract, g["grant_id"], overall="REJECTED")
+    _appeal(module, contract, r["report_id"], overall="REJECTED")
+    # the grantee had their second look and lost — no need to wait out the window
+    _as(module, FUNDER)
+    out = contract.finalize_clawback(g["grant_id"])
+    assert out["status"] == "CLAWED_BACK"
+    assert int(out["refunded_wei"]) == 6 * GEN
+
+
+def test_funder_cannot_bypass_window_via_close_grant(module, contract):
+    g = _award(module, contract)
+    for _ in range(3):
+        _report(module, contract, g["grant_id"], overall="REJECTED")
+    _as(module, FUNDER)
+    with pytest.raises(module.gl.vm.UserError, match="not ACTIVE"):
+        contract.close_grant(g["grant_id"])
 
 
 def test_approval_resets_rejection_streak(module, contract):

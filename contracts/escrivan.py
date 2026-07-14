@@ -1,4 +1,4 @@
-# v0.1.0
+# v0.2.0
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
@@ -15,9 +15,21 @@ MAX_GRANT_WEI = 10 * (10 ** 18)         # 10 GEN — demo cap so awards stay pay
 MIN_OBLIGATIONS = 2
 MAX_OBLIGATIONS = 6
 
-# Three consecutive rejected reports auto-closes the grant and returns the
-# remaining escrow to the funder.
+# Three consecutive rejected reports puts the grant into CLAWBACK_PENDING;
+# the refund executes only via finalize_clawback after the appeal window.
 CLAWBACK_REJECTION_STREAK = 3
+
+# Bonded appeal: a REJECTED report can be appealed ONCE by the grantee, who
+# posts a bond and may attach custom instructions for the second panel round.
+# A flipped ruling refunds the bond and releases the tranche; an upheld ruling
+# forfeits the bond to the funder (the party a frivolous appeal wastes).
+APPEAL_BOND_BPS     = 100               # 1% of the tranche at stake
+MIN_APPEAL_BOND_WEI = 1 * (10 ** 16)    # floor: 0.01 GEN
+
+# No wall-clock exists on the GenVM, so the appeal window before a clawback
+# executes is measured in PROTOCOL ACTIONS (any state-changing call ticks the
+# counter) — a rejection can never drain the escrow in the same breath.
+APPEAL_WINDOW_ACTIONS = 2
 
 ALLOWED_VERDICTS = ["APPROVED", "REJECTED"]
 
@@ -80,6 +92,9 @@ class Escrivan(gl.Contract):
     total_clawed_back_wei: u256    # lifetime total returned to funders
     active_grant_count:    u256
 
+    # monotonic; ticks on every write — the no-clock appeal window
+    action_counter: u256
+
     # ── constructor ─────────────────────────────────────────────────────────
     def __init__(self):
         self.grants  = TreeMap()
@@ -92,8 +107,13 @@ class Escrivan(gl.Contract):
         self.total_disbursed_wei   = u256(0)
         self.total_clawed_back_wei = u256(0)
         self.active_grant_count    = u256(0)
+        self.action_counter        = u256(0)
 
     # ── internal helpers ────────────────────────────────────────────────────
+
+    def _tick(self) -> int:
+        self.action_counter = u256(int(self.action_counter) + 1)
+        return int(self.action_counter)
 
     def _append_index(self, index: TreeMap[str, str], key: str, value: str) -> None:
         raw = index.get(key)
@@ -123,6 +143,144 @@ class Escrivan(gl.Contract):
     def _save_report(self, report: dict) -> None:
         self.reports[report["report_id"]] = json.dumps(report)
 
+    def _run_panel(
+        self,
+        grant: dict,
+        obligation_index: int,
+        obligation_text: str,
+        narrative: str,
+        urls: list,
+        appeal_ctx: typing.Any = None,
+    ) -> dict:
+        """
+        One full review round: validators fetch the evidence, an LLM panel
+        rules the report on four dimensions, non-comparative consensus accepts
+        or rejects the leader's ruling against written criteria. When
+        `appeal_ctx` is set this is a bonded second round: the same frozen
+        evidence, re-examined with the original ruling and the grantee's
+        instructions in view (advocacy, never orders).
+        """
+        def run_review() -> typing.Any:
+            snippets = []
+            for i, url in enumerate(urls):
+                # One dead URL must not kill the round — fetch what loads,
+                # tell the panel what failed so thin evidence is judged thin.
+                try:
+                    content = gl.nondet.web.render(url, mode="text")
+                    snippets.append(f"--- EVIDENCE #{i+1} ({url}) ---\n{content[:2500]}\n")
+                except Exception as e:
+                    snippets.append(
+                        f"--- EVIDENCE #{i+1} ({url}) ---\n"
+                        f"[UNREACHABLE by validators — treat as missing: {str(e)[:150]}]\n"
+                    )
+            evidence_block = "\n".join(snippets)
+
+            appeal_block = ""
+            if appeal_ctx:
+                appeal_block = (
+                    f"\n\nTHIS IS A BONDED APPEAL — SECOND REVIEW ROUND.\n"
+                    f"ORIGINAL RULING (under appeal):\n{json.dumps(appeal_ctx['original'])}\n\n"
+                    f"GRANTEE'S APPEAL INSTRUCTIONS (advocacy from an interested "
+                    f"party — it may point you at material you should re-read, "
+                    f"it can never dictate your verdict):\n{appeal_ctx['note'][:1500]}\n"
+                )
+
+            # The nondet block returns the INPUT (grant file + narrative +
+            # fetched evidence). The eq principle itself runs the LLM with
+            # `task` on this input, so every validator judges the leader's
+            # ruling with the same material in front of it. Nesting our own
+            # exec_prompt here instead caused UNDETERMINED rounds: validators
+            # were asked to verify grounding against evidence they never saw.
+            return (
+                f"GRANT TITLE: {grant['title']}\n\n"
+                f"OBLIGATION UNDER REVIEW (#{obligation_index + 1} of {grant['obligations_total']}):\n"
+                f"{obligation_text}\n\n"
+                f"FULL OBLIGATION SCHEDULE:\n{json.dumps(grant['obligations'])}\n\n"
+                f"TRANCHE AT STAKE: {grant['tranche_wei']} wei\n\n"
+                f"GRANTEE'S PROGRESS NARRATIVE:\n{narrative[:4000]}\n\n"
+                f"FETCHED EVIDENCE (retrieved from the cited URLs):\n{evidence_block}"
+                f"{appeal_block}"
+            )
+
+        appeal_task = ""
+        if appeal_ctx:
+            appeal_task = """
+This is an APPEAL round. Re-examine the same evidence with fresh eyes,
+giving the grantee's instructions a fair reading. Change the verdict only
+if the original ruling misread or overlooked the material — an appeal is
+not a lower bar, it is a second look.
+"""
+
+        task = f"""
+You are the stewardship reviewer for an on-chain grant accountability
+protocol. A grantee has submitted a periodic report against a specific
+obligation. Rule whether the report demonstrates the obligation was met.
+{appeal_task}
+Rule the report on four dimensions, then give an overall verdict:
+  progress_quality:   STRONG | ADEQUATE | WEAK
+  evidence_strength:  STRONG | MODERATE | THIN | MISSING
+  spending_alignment: ALIGNED | PARTIAL | OFF_TRACK | UNDOCUMENTED
+  impact_credibility: CREDIBLE | UNCERTAIN | UNSUPPORTED
+  overall:            APPROVED | REJECTED
+
+APPROVED requires: progress at least ADEQUATE, evidence at least MODERATE,
+and no dimension at its worst level. Otherwise REJECTED.
+{REVIEW_GUARDRAILS}
+Respond ONLY with this JSON (no markdown fence, no prose):
+{{
+  "progress_quality":   "<enum>",
+  "evidence_strength":  "<enum>",
+  "spending_alignment": "<enum>",
+  "impact_credibility": "<enum>",
+  "overall":            "<APPROVED|REJECTED>",
+  "confidence":         <0-100 integer>,
+  "red_flags":          ["<string>", ...],
+  "missing_information":["<string>", ...],
+  "summary":            "<2-4 sentence rationale citing the narrative and evidence>"
+}}
+"""
+
+        # Non-comparative consensus: validators judge the leader's ruling
+        # against written criteria instead of re-running the LLM and comparing
+        # decision fields (borderline qualitative cases can land on different
+        # verdicts across rollouts; comparative matching would false-reject).
+        # Criteria are phrased so a validator can always evaluate them from
+        # the task, the input, and the output alone.
+        criteria = f"""
+Accept the output if ALL of the following hold:
+- It is a single JSON object with the keys: progress_quality,
+  evidence_strength, spending_alignment, impact_credibility, overall,
+  confidence, red_flags, missing_information, summary.
+- Each enum field is in its declared set ({ALLOWED_PROGRESS} /
+  {ALLOWED_EVIDENCE} / {ALLOWED_SPENDING} / {ALLOWED_IMPACT} /
+  {ALLOWED_VERDICTS}).
+- confidence is an integer 0-100.
+- red_flags and missing_information are arrays (possibly empty).
+- summary is a non-empty string consistent with the verdict and the four
+  dimension findings — not generic boilerplate.
+- The overall verdict is a defensible reading of the four dimensions under
+  the stated rule (APPROVED needs progress at least ADEQUATE, evidence at
+  least MODERATE, and no dimension at its worst level). Borderline
+  judgments are acceptable when the summary justifies them.
+"""
+        raw = gl.eq_principle.prompt_non_comparative(
+            run_review,
+            task=task,
+            criteria=criteria,
+        )
+
+        text_out = raw.strip()
+        if "```" in text_out:
+            parts = text_out.split("```")
+            text_out = parts[1] if len(parts) > 1 else text_out
+            if text_out.startswith("json"):
+                text_out = text_out[4:]
+        start = text_out.find("{")
+        end = text_out.rfind("}")
+        if start == -1 or end == -1:
+            raise gl.vm.UserError("Panel output did not contain a JSON object")
+        return json.loads(text_out[start : end + 1])
+
     def _refund_remaining(self, grant: dict) -> int:
         """Return unreleased escrow to the funder. Returns the wei refunded."""
         remaining = int(grant["escrow_remaining_wei"])
@@ -146,6 +304,9 @@ class Escrivan(gl.Contract):
             "min_obligations":       MIN_OBLIGATIONS,
             "max_obligations":       MAX_OBLIGATIONS,
             "clawback_streak":       CLAWBACK_REJECTION_STREAK,
+            "appeal_bond_bps":       APPEAL_BOND_BPS,
+            "min_appeal_bond_wei":   str(MIN_APPEAL_BOND_WEI),
+            "appeal_window_actions": APPEAL_WINDOW_ACTIONS,
             "total_awarded_wei":     str(int(self.total_awarded_wei)),
             "total_disbursed_wei":   str(int(self.total_disbursed_wei)),
             "total_clawed_back_wei": str(int(self.total_clawed_back_wei)),
@@ -213,6 +374,7 @@ class Escrivan(gl.Contract):
         """
         funder = str(gl.message.sender_address)
         total = int(gl.message.value)
+        self._tick()
 
         if total < MIN_GRANT_WEI:
             raise gl.vm.UserError(f"Grant below minimum ({MIN_GRANT_WEI} wei)")
@@ -253,7 +415,8 @@ class Escrivan(gl.Contract):
             "obligations_total":    n,
             "obligations_met":      0,
             "rejection_streak":     0,
-            "status":               "ACTIVE",   # ACTIVE | COMPLETED | CLAWED_BACK | CLOSED_BY_FUNDER
+            "status":               "ACTIVE",   # ACTIVE | COMPLETED | CLAWBACK_PENDING | CLAWED_BACK | CLOSED_BY_FUNDER
+            "clawback_armed_at":    0,
             "report_ids":           [],
         }
         self._save_grant(grant)
@@ -281,6 +444,7 @@ class Escrivan(gl.Contract):
         """
         sender = str(gl.message.sender_address)
         grant = self._load_grant(grant_id)
+        self._tick()
 
         if grant["grantee"].lower() != sender.lower():
             raise gl.vm.UserError("Only the grantee may submit a report")
@@ -300,107 +464,7 @@ class Escrivan(gl.Contract):
             raise gl.vm.UserError("At least one evidence URL is required")
 
         obligation_text = grant["obligations"][obligation_index]
-
-        def run_review() -> typing.Any:
-            snippets = []
-            for i, url in enumerate(urls):
-                # One dead URL must not kill the round — fetch what loads,
-                # tell the panel what failed so thin evidence is judged thin.
-                try:
-                    content = gl.nondet.web.render(url, mode="text")
-                    snippets.append(f"--- EVIDENCE #{i+1} ({url}) ---\n{content[:2500]}\n")
-                except Exception as e:
-                    snippets.append(
-                        f"--- EVIDENCE #{i+1} ({url}) ---\n"
-                        f"[UNREACHABLE by validators — treat as missing: {str(e)[:150]}]\n"
-                    )
-            evidence_block = "\n".join(snippets)
-
-            # The nondet block returns the INPUT (grant file + narrative +
-            # fetched evidence). The eq principle itself runs the LLM with
-            # `task` on this input, so every validator judges the leader's
-            # ruling with the same material in front of it. Nesting our own
-            # exec_prompt here instead caused UNDETERMINED rounds: validators
-            # were asked to verify grounding against evidence they never saw.
-            return (
-                f"GRANT TITLE: {grant['title']}\n\n"
-                f"OBLIGATION UNDER REVIEW (#{obligation_index + 1} of {grant['obligations_total']}):\n"
-                f"{obligation_text}\n\n"
-                f"FULL OBLIGATION SCHEDULE:\n{json.dumps(grant['obligations'])}\n\n"
-                f"TRANCHE AT STAKE: {grant['tranche_wei']} wei\n\n"
-                f"GRANTEE'S PROGRESS NARRATIVE:\n{text[:4000]}\n\n"
-                f"FETCHED EVIDENCE (retrieved from the cited URLs):\n{evidence_block}"
-            )
-
-        task = f"""
-You are the stewardship reviewer for an on-chain grant accountability
-protocol. A grantee has submitted a periodic report against a specific
-obligation. Rule whether the report demonstrates the obligation was met.
-
-Rule the report on four dimensions, then give an overall verdict:
-  progress_quality:   STRONG | ADEQUATE | WEAK
-  evidence_strength:  STRONG | MODERATE | THIN | MISSING
-  spending_alignment: ALIGNED | PARTIAL | OFF_TRACK | UNDOCUMENTED
-  impact_credibility: CREDIBLE | UNCERTAIN | UNSUPPORTED
-  overall:            APPROVED | REJECTED
-
-APPROVED requires: progress at least ADEQUATE, evidence at least MODERATE,
-and no dimension at its worst level. Otherwise REJECTED.
-{REVIEW_GUARDRAILS}
-Respond ONLY with this JSON (no markdown fence, no prose):
-{{
-  "progress_quality":   "<enum>",
-  "evidence_strength":  "<enum>",
-  "spending_alignment": "<enum>",
-  "impact_credibility": "<enum>",
-  "overall":            "<APPROVED|REJECTED>",
-  "confidence":         <0-100 integer>,
-  "red_flags":          ["<string>", ...],
-  "missing_information":["<string>", ...],
-  "summary":            "<2-4 sentence rationale citing the narrative and evidence>"
-}}
-"""
-
-        # Non-comparative consensus: validators judge the leader's ruling
-        # against written criteria instead of re-running the LLM and comparing
-        # decision fields (borderline qualitative cases can land on different
-        # verdicts across rollouts; comparative matching would false-reject).
-        # Criteria are phrased so a validator can always evaluate them from
-        # the task, the input, and the output alone.
-        criteria = f"""
-Accept the output if ALL of the following hold:
-- It is a single JSON object with the keys: progress_quality,
-  evidence_strength, spending_alignment, impact_credibility, overall,
-  confidence, red_flags, missing_information, summary.
-- Each enum field is in its declared set ({ALLOWED_PROGRESS} /
-  {ALLOWED_EVIDENCE} / {ALLOWED_SPENDING} / {ALLOWED_IMPACT} /
-  {ALLOWED_VERDICTS}).
-- confidence is an integer 0-100.
-- red_flags and missing_information are arrays (possibly empty).
-- summary is a non-empty string consistent with the verdict and the four
-  dimension findings — not generic boilerplate.
-- The overall verdict is a defensible reading of the four dimensions under
-  the stated rule (APPROVED needs progress at least ADEQUATE, evidence at
-  least MODERATE, and no dimension at its worst level). Borderline
-  judgments are acceptable when the summary justifies them.
-"""
-        raw = gl.eq_principle.prompt_non_comparative(
-            run_review,
-            task=task,
-            criteria=criteria,
-        )
-
-        text_out = raw.strip()
-        if "```" in text_out:
-            parts = text_out.split("```")
-            text_out = parts[1] if len(parts) > 1 else text_out
-            if text_out.startswith("json"):
-                text_out = text_out[4:]
-        start = text_out.find("{")
-        end = text_out.rfind("}")
-        if start == -1 or end == -1:
-            raise gl.vm.UserError("Panel output did not contain a JSON object")
-        ruling = json.loads(text_out[start : end + 1])
+        ruling = self._run_panel(grant, obligation_index, obligation_text, text, urls)
 
         overall = str(ruling.get("overall", "REJECTED")).upper()
         if overall not in ALLOWED_VERDICTS:
@@ -427,6 +491,12 @@ Accept the output if ALL of the following hold:
             "ai_missing":         [str(x) for x in ruling.get("missing_information", [])][:6],
             "ai_summary":         str(ruling.get("summary", ""))[:1200],
             "overall":            overall,
+            "original_overall":   overall,
+            "appealed":           False,
+            "appeal_note":        "",
+            "appeal_outcome":     "",       # "" | FLIPPED | UPHELD
+            "appeal_bond_wei":    "0",
+            "appeal_ruling":      None,
             "tranche_released_wei": "0",
         }
 
@@ -454,15 +524,164 @@ Accept the output if ALL of the following hold:
         else:
             grant["rejection_streak"] = int(grant["rejection_streak"]) + 1
             if int(grant["rejection_streak"]) >= CLAWBACK_REJECTION_STREAK:
-                self._refund_remaining(grant)
-                grant["status"] = "CLAWED_BACK"
-                self.active_grant_count = u256(max(0, int(self.active_grant_count) - 1))
+                # No instant drain: the clawback arms and waits out a real
+                # appeal window. finalize_clawback moves the money later —
+                # a flipped appeal in the meantime disarms it.
+                grant["status"] = "CLAWBACK_PENDING"
+                grant["clawback_armed_at"] = int(self.action_counter)
 
         grant["report_ids"] = grant.get("report_ids", []) + [report_id]
         self._save_grant(grant)
         self._save_report(report)
 
         return report
+
+    @gl.public.write.payable
+    def appeal_report(self, report_id: str, instructions: str) -> dict:
+        """
+        Bonded appeal: the grantee posts a bond (1% of the tranche, min
+        0.01 GEN) to trigger a second panel round over the SAME frozen
+        evidence, with their custom instructions in front of the panel as
+        advocacy. A flipped ruling refunds the bond and releases the tranche
+        exactly as an approval would; an upheld ruling forfeits the bond to
+        the funder. One appeal per report, latest report only.
+        """
+        sender = str(gl.message.sender_address)
+        report = self._load_report(report_id)
+        grant = self._load_grant(report["grant_id"])
+        self._tick()
+
+        if grant["grantee"].lower() != sender.lower():
+            raise gl.vm.UserError("Only the grantee may appeal a ruling")
+        if grant["status"] not in ("ACTIVE", "CLAWBACK_PENDING"):
+            raise gl.vm.UserError(f"Grant status is {grant['status']} — nothing left to appeal")
+        if report["overall"] != "REJECTED":
+            raise gl.vm.UserError("Only a REJECTED report can be appealed")
+        if report.get("appealed"):
+            raise gl.vm.UserError("This report was already appealed — one appeal per report")
+        ids = grant.get("report_ids", [])
+        if not ids or ids[-1] != report_id:
+            raise gl.vm.UserError("Only the grant's latest report can be appealed")
+
+        note = (instructions or "").strip()
+        if len(note) < 20:
+            raise gl.vm.UserError(
+                "State your appeal — tell the panel what the first round misread (min 20 chars)"
+            )
+
+        required = max(int(grant["tranche_wei"]) * APPEAL_BOND_BPS // 10000, MIN_APPEAL_BOND_WEI)
+        bond = int(gl.message.value)
+        if bond < required:
+            raise gl.vm.UserError(
+                f"Appeal bond too small: {required} wei required (1% of the tranche, min {MIN_APPEAL_BOND_WEI})"
+            )
+
+        original = {
+            "progress_quality":   report["ai_progress"],
+            "evidence_strength":  report["ai_evidence"],
+            "spending_alignment": report["ai_spending"],
+            "impact_credibility": report["ai_impact"],
+            "overall":            report["overall"],
+            "summary":            report["ai_summary"],
+        }
+        ruling = self._run_panel(
+            grant,
+            int(report["obligation_index"]),
+            report["obligation_text"],
+            report["narrative"],
+            report["evidence_urls"],
+            appeal_ctx={"original": original, "note": note},
+        )
+
+        overall = str(ruling.get("overall", "REJECTED")).upper()
+        if overall not in ALLOWED_VERDICTS:
+            overall = "REJECTED"
+        flipped = overall == "APPROVED"
+
+        report["appealed"] = True
+        report["appeal_note"] = note[:1500]
+        report["appeal_bond_wei"] = str(bond)
+        report["appeal_ruling"] = {
+            "progress_quality":   str(ruling.get("progress_quality", "WEAK")),
+            "evidence_strength":  str(ruling.get("evidence_strength", "MISSING")),
+            "spending_alignment": str(ruling.get("spending_alignment", "UNDOCUMENTED")),
+            "impact_credibility": str(ruling.get("impact_credibility", "UNSUPPORTED")),
+            "confidence":         int(ruling.get("confidence", 0)),
+            "summary":            str(ruling.get("summary", ""))[:1200],
+            "overall":            overall,
+        }
+
+        if flipped:
+            report["appeal_outcome"] = "FLIPPED"
+            report["overall"] = "APPROVED"
+            # the overturned rejection no longer counts against the streak
+            grant["rejection_streak"] = max(0, int(grant["rejection_streak"]) - 1)
+            if grant["status"] == "CLAWBACK_PENDING":
+                grant["status"] = "ACTIVE"
+                grant["clawback_armed_at"] = 0
+
+            # release the tranche exactly as an approval would
+            met_after = int(grant["obligations_met"]) + 1
+            if met_after == int(grant["obligations_total"]):
+                release = int(grant["escrow_remaining_wei"])
+            else:
+                release = int(grant["tranche_wei"])
+            release = min(release, int(grant["escrow_remaining_wei"]))
+            _Payee(Address(grant["grantee"])).emit_transfer(value=u256(release), on="finalized")
+            report["tranche_released_wei"] = str(release)
+            grant["escrow_remaining_wei"] = str(int(grant["escrow_remaining_wei"]) - release)
+            grant["obligations_met"] = met_after
+            self.total_disbursed_wei = u256(int(self.total_disbursed_wei) + release)
+            if met_after == int(grant["obligations_total"]):
+                grant["status"] = "COMPLETED"
+                self.active_grant_count = u256(max(0, int(self.active_grant_count) - 1))
+
+            # the bond comes home with the vindicated grantee
+            _Payee(Address(grant["grantee"])).emit_transfer(value=u256(bond), on="finalized")
+        else:
+            report["appeal_outcome"] = "UPHELD"
+            # a frivolous appeal wastes the funder's time — the bond is theirs
+            _Payee(Address(grant["funder"])).emit_transfer(value=u256(bond), on="finalized")
+
+        self._save_report(report)
+        self._save_grant(grant)
+        return report
+
+    @gl.public.write
+    def finalize_clawback(self, grant_id: str) -> dict:
+        """
+        Execute an armed clawback and return the remaining escrow to the
+        funder. Only possible after the appeal window: either the window's
+        protocol actions have elapsed since the third rejection, or the
+        grantee appealed and lost. A rejection can never drain the escrow in
+        the same breath.
+        """
+        grant = self._load_grant(grant_id)
+        self._tick()
+
+        if grant["status"] != "CLAWBACK_PENDING":
+            raise gl.vm.UserError(f"Grant status is {grant['status']}, not CLAWBACK_PENDING")
+
+        ids = grant.get("report_ids", [])
+        last = self._load_report(ids[-1]) if ids else None
+        appeal_resolved = bool(last and last.get("appealed") and last.get("appeal_outcome") == "UPHELD")
+
+        elapsed = int(self.action_counter) - int(grant.get("clawback_armed_at", 0))
+        if not appeal_resolved and elapsed < APPEAL_WINDOW_ACTIONS:
+            raise gl.vm.UserError(
+                f"appeal window still open — {APPEAL_WINDOW_ACTIONS - elapsed} more protocol "
+                f"action(s) must elapse (or the grantee's appeal resolve) before the clawback executes"
+            )
+
+        refunded = self._refund_remaining(grant)
+        grant["status"] = "CLAWED_BACK"
+        self.active_grant_count = u256(max(0, int(self.active_grant_count) - 1))
+        self._save_grant(grant)
+        return {
+            "grant_id":     grant_id,
+            "refunded_wei": str(refunded),
+            "status":       grant["status"],
+        }
 
     @gl.public.write
     def close_grant(self, grant_id: str) -> dict:
@@ -472,8 +691,11 @@ Accept the output if ALL of the following hold:
         """
         sender = str(gl.message.sender_address)
         grant = self._load_grant(grant_id)
+        self._tick()
         if grant["funder"].lower() != sender.lower():
             raise gl.vm.UserError("Only the funder may close a grant")
+        # ACTIVE only: a pending clawback must go through finalize_clawback's
+        # appeal window — early closure is not a window bypass.
         if grant["status"] != "ACTIVE":
             raise gl.vm.UserError(f"Grant status is {grant['status']}, not ACTIVE")
 

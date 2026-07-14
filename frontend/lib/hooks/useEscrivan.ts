@@ -197,3 +197,61 @@ export function useCloseGrant() {
 
   return { ...mutation, isClosing, closeGrant: mutation.mutate };
 }
+
+/** Grantee posts a bond for a second panel round with custom instructions. */
+export function useAppealReport() {
+  const contract = useEscrivanContract();
+  const qc = useQueryClient();
+  const [isAppealing, setIsAppealing] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: async (args: { reportId: string; instructions: string; bondWei: bigint }) => {
+      if (!contract) throw new Error("Contract not configured");
+      setIsAppealing(true);
+      return contract.appealReport(args.reportId, args.instructions, args.bondWei);
+    },
+    onSuccess: (data: any) => {
+      qc.invalidateQueries();
+      setIsAppealing(false);
+      success("Appeal ruled", {
+        description: "The second panel round has written its ruling on-chain.",
+        explorerUrl: explorerTxUrl(data?.txHash),
+      });
+    },
+    onError: (err: any) => {
+      setIsAppealing(false);
+      error("Appeal failed", { description: err?.message || "Please try again." });
+    },
+  });
+
+  return { ...mutation, isAppealing, appealReport: mutation.mutate };
+}
+
+/** Execute an armed clawback once the appeal window has run its course. */
+export function useFinalizeClawback() {
+  const contract = useEscrivanContract();
+  const qc = useQueryClient();
+  const [isFinalizing, setIsFinalizing] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: async (grantId: string) => {
+      if (!contract) throw new Error("Contract not configured");
+      setIsFinalizing(true);
+      return contract.finalizeClawback(grantId);
+    },
+    onSuccess: (data: any) => {
+      qc.invalidateQueries();
+      setIsFinalizing(false);
+      success("Clawback executed", {
+        description: "Remaining escrow returned to the funder.",
+        explorerUrl: explorerTxUrl(data?.txHash),
+      });
+    },
+    onError: (err: any) => {
+      setIsFinalizing(false);
+      error("Clawback not executed", { description: err?.message || "Please try again." });
+    },
+  });
+
+  return { ...mutation, isFinalizing, finalizeClawback: mutation.mutate };
+}

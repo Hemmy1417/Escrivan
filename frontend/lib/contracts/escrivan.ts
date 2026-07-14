@@ -52,6 +52,24 @@ class Escrivan {
       const stderr: string = r?.genvm_result?.stderr ?? "";
       const userErr = stderr.match(/UserError: (.+)/)?.[1];
       if (userErr) throw new Error(userErr);
+      // A clean gl.vm.UserError revert arrives with EMPTY stderr — the message
+      // rides in a rollback "payload" field. Walk the receipt for it.
+      const payloads: string[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const walk = (o: any, d = 0) => {
+        if (!o || d > 8) return;
+        if (Array.isArray(o)) { o.forEach((x) => walk(x, d + 1)); return; }
+        if (typeof o === "object") {
+          if (typeof o.payload === "string" && o.payload && o.payload !== "exit_code 1") payloads.push(o.payload);
+          Object.values(o).forEach((v) => walk(v, d + 1));
+        }
+      };
+      walk(receipt);
+      const fromPayload = payloads.sort((a, b) => b.length - a.length)[0];
+      if (fromPayload) {
+        console.error("[Escrivan] contract execution error:", { payloads });
+        throw new Error(fromPayload.slice(0, 240));
+      }
       const lines = stderr.trim().split("\n").filter((l) => l.trim() && !l.startsWith("  "));
       const last = lines[lines.length - 1] || "";
       console.error("[Escrivan] contract execution error:", stderr);
@@ -193,6 +211,34 @@ class Escrivan {
     const txHash = await this.client.writeContract({
       address: this.address,
       functionName: "close_grant",
+      args: [grantId],
+      value: BigInt(0),
+    });
+    const receipt = await this.waitAndVerify(txHash);
+    return { receipt, txHash: String(txHash) };
+  }
+
+  /** Grantee posts a bond to trigger a second panel round with their instructions. */
+  async appealReport(
+    reportId: string,
+    instructions: string,
+    bondWei: bigint,
+  ): Promise<{ receipt: TransactionReceipt; txHash: string }> {
+    const txHash = await this.client.writeContract({
+      address: this.address,
+      functionName: "appeal_report",
+      args: [reportId, instructions],
+      value: bondWei,
+    });
+    const receipt = await this.waitAndVerify(txHash);
+    return { receipt, txHash: String(txHash) };
+  }
+
+  /** Execute an armed clawback once the appeal window has run its course. */
+  async finalizeClawback(grantId: string): Promise<{ receipt: TransactionReceipt; txHash: string }> {
+    const txHash = await this.client.writeContract({
+      address: this.address,
+      functionName: "finalize_clawback",
       args: [grantId],
       value: BigInt(0),
     });

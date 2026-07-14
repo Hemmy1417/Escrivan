@@ -1,4 +1,4 @@
-export type GrantStatus = "ACTIVE" | "COMPLETED" | "CLAWED_BACK" | "CLOSED_BY_FUNDER";
+export type GrantStatus = "ACTIVE" | "COMPLETED" | "CLAWBACK_PENDING" | "CLAWED_BACK" | "CLOSED_BY_FUNDER";
 
 export type Grant = {
   grant_id: string;
@@ -13,6 +13,7 @@ export type Grant = {
   obligations_met: number;
   rejection_streak: number;
   status: GrantStatus;
+  clawback_armed_at?: number;
   report_ids: string[];
 };
 
@@ -35,6 +36,20 @@ export type Report = {
   ai_missing: string[];
   ai_summary: string;
   overall: ReportVerdict;
+  original_overall?: ReportVerdict;
+  appealed?: boolean;
+  appeal_note?: string;
+  appeal_outcome?: "" | "FLIPPED" | "UPHELD";
+  appeal_bond_wei?: string;
+  appeal_ruling?: {
+    progress_quality: string;
+    evidence_strength: string;
+    spending_alignment: string;
+    impact_credibility: string;
+    confidence: number;
+    summary: string;
+    overall: ReportVerdict;
+  } | null;
   tranche_released_wei: string;
 };
 

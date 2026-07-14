@@ -80,9 +80,26 @@ Escrivan/
 
 ---
 
+## Bonded appeals + the clawback window (v0.2)
+
+Two protections stand between one panel round and the money:
+
+- **Bonded appeal.** A REJECTED report can be appealed once by the grantee, who posts a bond
+  (1% of the tranche, min 0.01 GEN) and attaches **custom instructions** for the second panel
+  round — advocacy the panel reads but can never take orders from. The round re-fetches the
+  same frozen evidence. A **flipped** ruling releases the tranche and returns the bond; an
+  **upheld** ruling forfeits the bond to the funder, so frivolous appeals cost something.
+- **The clawback window.** Three consecutive rejections no longer drain the escrow in the same
+  breath: the clawback **arms** (`CLAWBACK_PENDING`) and `finalize_clawback` only executes after
+  the appeal window elapses (measured in protocol actions — the GenVM has no wall clock) or
+  after the grantee's appeal is upheld. A flipped appeal disarms it entirely. Early closure
+  cannot bypass the window.
+
+---
+
 ## Contract
 
-- **Address:** `0x1D4992438691B1562C13521E51F6ecc943281eCd`
+- **Address:** `0xf33a7860FBB0A7e3e883C4801A0F426a3820f94e`
 
 > **Payout fix (July 2026).** Wallet payouts are sent as EVM external messages (an empty `@gl.evm.contract_interface` proxy executed by the contract's ghost account). The previous GenVM-call pattern errored at finalization on plain wallets and stranded the value; the contract was redeployed at the address above with the corrected transfer path.
 
@@ -91,7 +108,7 @@ Escrivan/
 
 Read state:
 ```bash
-genlayer call 0x1D4992438691B1562C13521E51F6ecc943281eCd get_protocol_stats
+genlayer call 0xf33a7860FBB0A7e3e883C4801A0F426a3820f94e get_protocol_stats
 ```
 
 ---
