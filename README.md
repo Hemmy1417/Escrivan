@@ -80,20 +80,27 @@ Escrivan/
 
 ---
 
-## Bonded appeals + the clawback window (v0.2)
+## What's new in v0.2
 
-Two protections stand between one panel round and the money:
+Added per GenLayer hackathon judge feedback — two protections now stand between one panel
+round and the money:
 
-- **Bonded appeal.** A REJECTED report can be appealed once by the grantee, who posts a bond
-  (1% of the tranche, min 0.01 GEN) and attaches **custom instructions** for the second panel
-  round — advocacy the panel reads but can never take orders from. The round re-fetches the
-  same frozen evidence. A **flipped** ruling releases the tranche and returns the bond; an
-  **upheld** ruling forfeits the bond to the funder, so frivolous appeals cost something.
-- **The clawback window.** Three consecutive rejections no longer drain the escrow in the same
-  breath: the clawback **arms** (`CLAWBACK_PENDING`) and `finalize_clawback` only executes after
-  the appeal window elapses (measured in protocol actions — the GenVM has no wall clock) or
-  after the grantee's appeal is upheld. A flipped appeal disarms it entirely. Early closure
-  cannot bypass the window.
+- **`appeal_report` — bonded secondary review with custom instructions.** A REJECTED report
+  can be appealed once by the grantee, who posts a bond (1% of the tranche, min 0.01 GEN) and
+  attaches **custom instructions** for the second panel round — advocacy the panel reads but
+  can never take orders from. The round re-fetches the same frozen evidence. A **flipped**
+  ruling releases the tranche and returns the bond; an **upheld** ruling forfeits the bond to
+  the funder, so frivolous appeals cost something. Both rulings live on the report forever.
+- **`finalize_clawback` — a real appeal window before escrow moves.** Three consecutive
+  rejections no longer drain the escrow in the same transaction: the clawback **arms**
+  (`CLAWBACK_PENDING`) and only executes after the appeal window elapses (measured in protocol
+  actions — the GenVM has no wall clock) or after the grantee's appeal is upheld. A flipped
+  appeal disarms it entirely. Early closure cannot bypass the window.
+- **Frontend:** appeal form (bond + instructions) and armed-clawback banner with the funder's
+  finalize action on the grant page; appeal outcomes shown on every report link; contract
+  reverts (e.g. *"appeal window still open"*) now surface as readable errors.
+- **Tests:** 30 direct-mode tests (13 new) covering flip/uphold payouts, bond floors,
+  latest-report/once-only/grantee-only guards, window enforcement, and the disarm path.
 
 ---
 
