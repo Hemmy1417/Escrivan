@@ -3,6 +3,22 @@ import { studionet } from "genlayer-js/chains";
 import type { Grant, Report, ProtocolStats, TransactionReceipt } from "./types";
 import { CONTRACT_ADDRESS } from "../config";
 
+// Resolve the CONNECTED wallet's EIP-1193 provider so writes are signed by the
+// wallet the user picked — not genlayer-js's implicit window.ethereum fallback,
+// which can be the wrong extension when several are installed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function resolveInjectedProvider(): any {
+  if (typeof window === "undefined") return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const eth: any = (window as any).ethereum;
+  if (!eth) return null;
+  if (Array.isArray(eth.providers)) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return eth.providers.find((p: any) => p.isMetaMask && !p.isCoinbaseWallet) ?? eth.providers[0] ?? eth;
+  }
+  return eth;
+}
+
 /**
  * Typed wrapper around the deployed Escrivan contract.
  *
@@ -22,7 +38,11 @@ class Escrivan {
   constructor(contractAddress: string = CONTRACT_ADDRESS, account?: string | null) {
     this.address = contractAddress as `0x${string}`;
     const config: any = { chain: studionet };
-    if (account) config.account = account as `0x${string}`;
+    if (account) {
+      config.account = account as `0x${string}`;
+      const provider = resolveInjectedProvider();
+      if (provider) config.provider = provider;
+    }
     this.client = createClient(config);
   }
 
