@@ -163,3 +163,15 @@ npm run dev
 3. **The panel rules.** Validators fetch the evidence, an LLM rules four dimensions + verdict, consensus accepts the ruling against written criteria.
 4. **Money moves.** Approved → tranche to the grantee, same transaction. Rejected → tranche held; three straight rejections → remaining escrow back to the funder.
 5. **Everything is public.** `/ledger` lists every ruling with the panel's reasoning; `/records` carries the protocol accounts.
+
+---
+
+## Signed writes
+
+Contract writes are signed by the **connected wallet's own EIP-1193 provider**. The
+contract wrapper resolves the injected provider (preferring MetaMask when several
+wallets are installed) and binds it into the genlayer-js client, so every transaction
+is signed by the wallet the user actually picked — never an implicit `window.ethereum`
+fallback that could be the wrong extension. A repository-level test
+(`frontend/tests/signed-write.test.ts`) proves the write path routes
+`eth_sendTransaction` through that provider with the correct `from`.
